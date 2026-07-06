@@ -1145,14 +1145,6 @@ class StealthReader(QWidget):
                     and elapsed < TIME_THRESHOLD
                     and not self.is_in_resize_area(event.pos())):
                 self.scroll_page(1)
-                self._click_handled = True
-
-            # 右键单击 → 上一页（抑制右键菜单）
-            if (self._click_button == Qt.RightButton
-                    and dist < CLICK_THRESHOLD
-                    and elapsed < TIME_THRESHOLD):
-                self.scroll_page(-1)
-                self._click_handled = True
 
         self.is_resizing = False
         self.is_moving = False
@@ -1160,11 +1152,6 @@ class StealthReader(QWidget):
         self.save_config()
 
     def contextMenuEvent(self, event):
-        # 如果右键单击已作为翻页处理，不弹出菜单
-        if self._click_handled:
-            self._click_handled = False
-            return
-
         cmenu = QMenu(self)
         cmenu.addAction("📂 打开本地 TXT").triggered.connect(self.open_local_file_dialog)
         cmenu.addSeparator()
