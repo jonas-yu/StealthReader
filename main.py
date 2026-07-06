@@ -74,6 +74,7 @@ class CornerFrame(QFrame):
         self.is_auto_mode = False
         self.corner_color = QColor(128, 128, 128, 200)
         self.auto_bg_fill = QColor(0, 0, 0, 2)
+        self._draw_corners = True  # 角标显示开关
 
     def set_mode(self, auto_mode):
         self.is_auto_mode = auto_mode
@@ -86,6 +87,7 @@ class CornerFrame(QFrame):
             self.update()
 
     def set_draw_corners(self, enable):
+        self._draw_corners = enable
         self.update()
 
     def paintEvent(self, event):
@@ -97,7 +99,7 @@ class CornerFrame(QFrame):
         painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), self.auto_bg_fill)
 
-        if self.height() > 20:
+        if self._draw_corners and self.height() > 20:
             painter.setPen(QPen(self.corner_color, 3))
             w, h = self.width(), self.height()
             length = 15
@@ -897,6 +899,7 @@ class StealthReader(QWidget):
     def enterEvent(self, event):
         self.is_mouse_in = True
         if self.config.get("ghost_mode", False):
+            self.content_frame.set_draw_corners(True)
             self.apply_style()
         super().enterEvent(event)
 
@@ -924,6 +927,7 @@ class StealthReader(QWidget):
                 """)
                 self.setWindowOpacity(1.0)
             else:
+                self.content_frame.set_draw_corners(False)
                 self.setWindowOpacity(0.005)
         super().leaveEvent(event)
 
