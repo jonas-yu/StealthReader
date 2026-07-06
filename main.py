@@ -413,6 +413,7 @@ class StealthReader(QWidget):
         self.local_start_index = 0  # 当前页起始字符在全文中的索引 (锚点)
         self.local_page_history = []  # 记录翻页历史，用于"上一页"
         self.local_file_path = ""  # 当前文件路径
+        self.local_chapters = []  # 本地章节索引 [(title, position), ...]
 
         # --- 界面控制 ---
         self.single_line_height = 20
@@ -517,6 +518,7 @@ class StealthReader(QWidget):
             self.is_local_mode = True
             self.local_file_path = file_path
             self.local_full_text = content
+            self.local_chapters = self._parse_chapters(content)  # 解析章节标题
 
             # 安全校验索引
             safe_pos = min(max(0, target_pos), len(content) - 1)
@@ -599,7 +601,126 @@ class StealthReader(QWidget):
         finally:
             self.text_edit.setUpdatesEnabled(True)
 
-    # --- 翻页逻辑 (即时存档 + 几何分页) ---
+    # --- 本地章节解析 ---
+    def _parse_chapters(self, text):
+        """解析文本中的章节标题，返回 [(标题, 字符位置), ...]"""
+        import re
+        chapters = []
+
+        # 中文数字映射（简写）
+        cn_num = r'[零一二三四五六七八九十百千万]+|\d+'
+
+        patterns = [
+            (r'^第{}[章節回卷节]'.format(cn_num), 1),      # 第X章/第X回
+            (r'^[Cc]hapter\s*\d+', 1),                       # Chapter X
+            (r'^[Cc][Hh]\s*\d+', 1),                          # CH X
+            (r'^第{}卷\s*第{}章'.format(cn_num, cn_num), 1), # 第X卷 第X章
+            (r'^[卷篇]\s*{}'.format(cn_num), 1),              # 卷X/篇X
+            (r'^(序章|楔子|前言|引子|引言|序幕)', 1),          # 特殊开头
+            (r'^(尾声|终章|结局|后记|番外|附录)', 1),          # 特殊结尾
+        ]
+
+        for line in text.split('\n'):
+            stripped = line.strip()
+            if not stripped or len(stripped) > 50:
+                continue
+            for pattern, _ in patterns:
+                if re.match(pattern, stripped):
+                    pos = text.index(line)
+                    chapters.append((stripped, pos))
+                    break
+
+        return chapters
+
+    # --- 本地章节跳转 ---
+    def open_local_chapter_selector(self):
+        """打开本地TXT的章节目录选择器"""
+        if not self.local_chapters:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "提示", "未识别到章节标题\n\n支持的格式：第X章、Chapter X、楔子、尾声等")
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📑 章节目录")
+        dlg.resize(350, 500)
+        dlg.setStyleSheet(DARK_STYLESHEET)
+        layout = QVBoxLayout(dlg)
+        lst = QListWidget()
+        for i, (title, pos) in enumerate(self.local_chapters):
+            item = QListWidgetItem(f"{title}")
+            item.setData(Qt.UserRole, pos)
+            lst.addItem(item)
+        layout.addWidget(lst)
+        dlg.setLayout(layout)
+
+        lst.itemDoubleClicked.connect(lambda item: self._jump_to_chapter(item.data(Qt.UserRole)))
+        lst.itemDoubleClicked.connect(lambda: dlg.accept())
+        dlg.exec_()
+
+    def _jump_to_chapter(self, pos):
+        """跳转到指定字符位置"""
+        self.local_start_index = pos
+        self.local_page_history = []
+        self.render_local_page()
+        self.config["last_local_pos"] = pos
+        self.save_config()
+
+    # --- 全文搜索 ---
+    def open_search_dialog(self):
+        """打开全文搜索对话框"""
+        if not self.local_full_text:
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("🔍 全文搜索")
+        dlg.resize(400, 500)
+        dlg.setStyleSheet(DARK_STYLESHEET)
+        layout = QVBoxLayout(dlg)
+
+        search_box = QLineEdit()
+        search_box.setPlaceholderText("输入关键词搜索...")
+        layout.addWidget(search_box)
+
+        lst = QListWidget()
+        layout.addWidget(lst)
+
+        status = QLabel("输入关键词后按回车搜索")
+        status.setStyleSheet("color: #888; padding: 5px;")
+        layout.addWidget(status)
+        dlg.setLayout(layout)
+
+        def do_search():
+            keyword = search_box.text().strip()
+            if not keyword:
+                return
+            lst.clear()
+            text = self.local_full_text
+            pos = 0
+            count = 0
+            while count < 100:
+                idx = text.find(keyword, pos)
+                if idx == -1:
+                    break
+                # 截取上下文（前后各15字）
+                start = max(0, idx - 15)
+                end = min(len(text), idx + len(keyword) + 15)
+                snippet = text[start:end].replace('\n', ' ').replace('\r', '')
+                if start > 0:
+                    snippet = "…" + snippet
+                if end < len(text):
+                    snippet = snippet + "…"
+                item = QListWidgetItem(snippet)
+                item.setData(Qt.UserRole, idx)
+                lst.addItem(item)
+                pos = idx + len(keyword)
+                count += 1
+            status.setText(f"找到 {count} 处匹配" if count > 0 else "未找到匹配")
+
+        search_box.returnPressed.connect(do_search)
+        lst.itemDoubleClicked.connect(lambda item: self._jump_to_chapter(item.data(Qt.UserRole)))
+        lst.itemDoubleClicked.connect(lambda: dlg.accept())
+        dlg.exec_()
+
     def scroll_page(self, direction):
         if self.is_local_mode:
             # --- 本地模式 ---
@@ -1159,6 +1280,11 @@ class StealthReader(QWidget):
         cmenu = QMenu(self)
         cmenu.addAction("📂 打开本地 TXT").triggered.connect(self.open_local_file_dialog)
         cmenu.addSeparator()
+        # 本地模式：章节跳转 + 全文搜索
+        if self.is_local_mode:
+            cmenu.addAction("📑 章节目录 (本地)").triggered.connect(self.open_local_chapter_selector)
+            cmenu.addAction("🔍 全文搜索").triggered.connect(self.open_search_dialog)
+            cmenu.addSeparator()
         cmenu.addAction("📚 网络书架 (搜索)").triggered.connect(self.open_book_selector)
         cmenu.addAction("📖 章节目录 (网络)").triggered.connect(self.open_toc_selector)
         cmenu.addSeparator()
