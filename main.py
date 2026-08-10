@@ -1,4 +1,5 @@
 import sys
+import re
 import requests
 import json
 import os
@@ -171,6 +172,211 @@ class BookSelector(QDialog):
     def on_item_double_clicked(self, item):
         self.selected_book = item.data(Qt.UserRole)
         self.accept()
+
+
+# ================= 本地章节识别 =================
+# 章节标题行模式（行首匹配，限制整行长度避免正文误判）
+# 合并自仓库版格式：第X章/第X回/第X卷/卷X/篇X/Chapter X/CH X/序章/楔子/番外等
+LOCAL_CHAPTER_LINE = re.compile(
+    r'^(?:'
+    r'第[0-9一二三四五六七八九十百千万零两〇]+卷\s*第[0-9一二三四五六七八九十百千万零两〇]+章'   # 第X卷 第X章
+    r'|第[0-9一二三四五六七八九十百千万零两〇]+[章回节卷集部篇幕]'                              # 第X章/回/节/卷/集/部/篇/幕
+    r'|[Cc]hapter\s*\d+'                                                                  # Chapter X
+    r'|[Cc][Hh]\s*\d+'                                                                     # CH X
+    r'|[卷篇]\s*[0-9一二三四五六七八九十百千万零两〇]+'                                       # 卷X/篇X
+    r'|(?:序章|楔子|引子|引言|序幕|前言|序言|尾声|终章|结局|后记|番外(?:篇)?|外传(?:篇)?|附录|上架感言|完结感言)'  # 特殊
+    r')(?:\s+.*)?$'
+)
+LOCAL_CHAPTER_MAX_LEN = 60  # 章节标题行最大长度
+
+
+class LocalChapterBuilder(QThread):
+    """后台线程：扫描本地 TXT 全文，生成章节索引 [{title, start_index}]"""
+    finished = pyqtSignal(list)
+
+    def __init__(self, full_text):
+        super().__init__()
+        self.full_text = full_text
+
+    def run(self):
+        chapters = []
+        offset = 0
+        for line in self.full_text.split('\n'):
+            stripped = line.strip()
+            if stripped and len(stripped) <= LOCAL_CHAPTER_MAX_LEN \
+                    and LOCAL_CHAPTER_LINE.match(stripped):
+                chapters.append({'title': stripped, 'start_index': offset})
+            offset += len(line) + 1  # +1 换行符
+        self.finished.emit(chapters)
+
+
+# ================= 本地章节选择窗口 =================
+class LocalTocSelector(QDialog):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.selected_index = None
+        self.setWindowTitle("📑 章节目录")
+        self.resize(360, 500)
+        self.setStyleSheet(DARK_STYLESHEET)
+        self.initUI()
+        if main_window.local_chapters:
+            self.populate(main_window.local_chapters)
+        else:
+            self.status_label.show()
+            main_window.build_local_chapters()  # 未构建则触发后台构建
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        self.status_label = QLabel("正在解析章节...")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        self.status_label.hide()
+        layout.addWidget(self.status_label)
+
+        self.list_widget = QListWidget()
+        self.list_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.list_widget)
+        self.setLayout(layout)
+
+    def populate(self, chapters):
+        self.setWindowTitle(f"📑 章节目录 (共 {len(chapters)} 章)")
+        self.status_label.hide()
+        self.list_widget.clear()
+        if not chapters:
+            return
+        current_pos = self.main_window.local_start_index if self.main_window else 0
+        current_row = 0
+        for i, ch in enumerate(chapters):
+            item = QListWidgetItem(ch['title'])
+            item.setData(Qt.UserRole, ch['start_index'])
+            self.list_widget.addItem(item)
+            if ch['start_index'] <= current_pos:
+                current_row = i
+        # 定位到当前阅读位置所在章节
+        self.list_widget.setCurrentRow(current_row)
+        self.list_widget.scrollToItem(self.list_widget.item(current_row),
+                                      QListWidget.PositionAtCenter)
+
+    def on_item_double_clicked(self, item):
+        self.selected_index = item.data(Qt.UserRole)
+        self.accept()
+
+
+# ================= 搜索窗口（本地/网络通用） =================
+class SearchDialog(QDialog):
+    def __init__(self, main_window, parent=None):
+        super().__init__(parent)
+        self.main_window = main_window
+        self.setWindowTitle("🔍 搜索")
+        self.resize(440, 480)
+        self.setStyleSheet(DARK_STYLESHEET)
+        self.initUI()
+
+    def initUI(self):
+        layout = QVBoxLayout()
+        top = QHBoxLayout()
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("输入关键词，回车搜索...")
+        self.search_input.returnPressed.connect(self.do_search)
+        top.addWidget(self.search_input)
+        btn_search = QPushButton("🔍 搜索")
+        btn_search.clicked.connect(self.do_search)
+        top.addWidget(btn_search)
+        layout.addLayout(top)
+
+        self.result_list = QListWidget()
+        self.result_list.itemDoubleClicked.connect(self.on_item_double_clicked)
+        layout.addWidget(self.result_list)
+
+        self.status_label = QLabel("")
+        self.status_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.status_label)
+        self.setLayout(layout)
+        self.search_input.setFocus()
+
+    def do_search(self):
+        keyword = self.search_input.text().strip()
+        if not keyword:
+            return
+        self.result_list.clear()
+        self.status_label.setText("搜索中...")
+        QTimer.singleShot(10, lambda: self._run_search(keyword))
+
+    def _find_all_positions(self, text, keyword):
+        positions = []
+        start = 0
+        while True:
+            idx = text.find(keyword, start)
+            if idx == -1:
+                break
+            positions.append(idx)
+            start = idx + len(keyword)
+        return positions
+
+    def _run_search(self, keyword):
+        mw = self.main_window
+        count = 0
+        try:
+            if mw.is_local_mode:
+                # --- 本地模式：全文搜索 ---
+                text = mw.local_full_text
+                for pos in self._find_all_positions(text, keyword)[:500]:
+                    ctx_start = max(0, pos - 15)
+                    ctx_end = min(len(text), pos + len(keyword) + 15)
+                    ctx = text[ctx_start:ctx_end].replace('\n', ' ')
+                    item = QListWidgetItem(f"…{ctx}…")
+                    item.setData(Qt.UserRole, ('local', pos))
+                    self.result_list.addItem(item)
+                    count += 1
+            else:
+                # --- 网络模式：目录标题 + 当前章节内容 ---
+                toc = mw.current_toc or []
+                for i, ch in enumerate(toc):
+                    title = str(ch.get('title', ''))
+                    if keyword.lower() in title.lower():
+                        item = QListWidgetItem(f"📖 {title}")
+                        item.setData(Qt.UserRole, ('chapter', i))
+                        self.result_list.addItem(item)
+                        count += 1
+                current_text = mw.text_edit.toPlainText()
+                for pos in self._find_all_positions(current_text, keyword)[:200]:
+                    ctx_start = max(0, pos - 15)
+                    ctx_end = min(len(current_text), pos + len(keyword) + 15)
+                    ctx = current_text[ctx_start:ctx_end].replace('\n', ' ')
+                    item = QListWidgetItem(f"📄 …{ctx}…")
+                    item.setData(Qt.UserRole, ('scroll', pos))
+                    self.result_list.addItem(item)
+                    count += 1
+            self.status_label.setText(f"共找到 {count} 处")
+        except Exception as e:
+            self.status_label.setText(f"搜索出错: {str(e)}")
+
+    def on_item_double_clicked(self, item):
+        kind, data = item.data(Qt.UserRole)
+        mw = self.main_window
+        if kind == 'local':
+            # 本地跳转：设置锚点并重绘
+            mw.local_page_history = []
+            mw.local_start_index = data
+            mw.render_local_page()
+            mw.config["last_local_pos"] = mw.local_start_index
+            mw.save_config()
+            self.accept()
+        elif kind == 'chapter':
+            # 网络跳转章节
+            if mw.current_book:
+                mw.current_chapter_index = data
+                mw.fetch_chapter_content(mw.current_book['bookUrl'], data, False)
+                self.accept()
+            else:
+                self.status_label.setText("当前无书籍，无法跳转章节")
+        elif kind == 'scroll':
+            # 网络当前章节内定位
+            cursor = mw.text_edit.textCursor()
+            cursor.setPosition(data)
+            mw.text_edit.setTextCursor(cursor)
+            mw.text_edit.ensureCursorVisible()
+            self.accept()
 
 
 # ================= 独立窗口：目录选择器 =================
@@ -413,7 +619,9 @@ class StealthReader(QWidget):
         self.local_start_index = 0  # 当前页起始字符在全文中的索引 (锚点)
         self.local_page_history = []  # 记录翻页历史，用于"上一页"
         self.local_file_path = ""  # 当前文件路径
-        self.local_chapters = []  # 本地章节索引 [(title, position), ...]
+        self.local_chapters = []  # 本地章节索引 [{title, start_index}]
+        self.chapter_builder = None  # 章节构建线程
+        self.local_toc_dialog = None  # 本地章节选择对话框引用
 
         # --- 界面控制 ---
         self.single_line_height = 20
@@ -518,7 +726,8 @@ class StealthReader(QWidget):
             self.is_local_mode = True
             self.local_file_path = file_path
             self.local_full_text = content
-            self.local_chapters = self._parse_chapters(content)  # 解析章节标题
+            self.local_chapters = []  # 重置章节索引，后台重建
+            self.build_local_chapters()
 
             # 安全校验索引
             safe_pos = min(max(0, target_pos), len(content) - 1)
@@ -601,61 +810,46 @@ class StealthReader(QWidget):
         finally:
             self.text_edit.setUpdatesEnabled(True)
 
-    # --- 本地章节解析 ---
-    def _parse_chapters(self, text):
-        """解析文本中的章节标题，返回 [(标题, 字符位置), ...]"""
-        import re
-        chapters = []
+    # --- 本地章节构建与跳转 ---
+    def build_local_chapters(self):
+        """后台线程构建本地章节索引（大文件不卡 UI）"""
+        if not self.local_full_text or not self.is_local_mode:
+            return
+        try:
+            self.chapter_builder = LocalChapterBuilder(self.local_full_text)
+            self.chapter_builder.finished.connect(self.on_local_chapters_built)
+            self.chapter_builder.start()
+        except Exception as e:
+            print(f"章节构建失败: {e}")
 
-        # 中文数字映射（简写）
-        cn_num = r'[零一二三四五六七八九十百千万]+|\d+'
-
-        patterns = [
-            (r'^第{}[章節回卷节]'.format(cn_num), 1),      # 第X章/第X回
-            (r'^[Cc]hapter\s*\d+', 1),                       # Chapter X
-            (r'^[Cc][Hh]\s*\d+', 1),                          # CH X
-            (r'^第{}卷\s*第{}章'.format(cn_num, cn_num), 1), # 第X卷 第X章
-            (r'^[卷篇]\s*{}'.format(cn_num), 1),              # 卷X/篇X
-            (r'^(序章|楔子|前言|引子|引言|序幕)', 1),          # 特殊开头
-            (r'^(尾声|终章|结局|后记|番外|附录)', 1),          # 特殊结尾
-        ]
-
-        for line in text.split('\n'):
-            stripped = line.strip()
-            if not stripped or len(stripped) > 50:
-                continue
-            for pattern, _ in patterns:
-                if re.match(pattern, stripped):
-                    pos = text.index(line)
-                    chapters.append((stripped, pos))
-                    break
-
-        return chapters
+    def on_local_chapters_built(self, chapters):
+        self.local_chapters = chapters
+        if self.local_toc_dialog and self.local_toc_dialog.isVisible():
+            self.local_toc_dialog.populate(chapters)
 
     # --- 本地章节跳转 ---
     def open_local_chapter_selector(self):
         """打开本地TXT的章节目录选择器"""
-        if not self.local_chapters:
-            from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.information(self, "提示", "未识别到章节标题\n\n支持的格式：第X章、Chapter X、楔子、尾声等")
+        if not self.is_local_mode:
+            self.update_text_signal.emit("请先打开本地 TXT 文件", False)
+            return
+        if not self.local_full_text:
+            self.update_text_signal.emit("文件内容为空", False)
             return
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("📑 章节目录")
-        dlg.resize(350, 500)
-        dlg.setStyleSheet(DARK_STYLESHEET)
-        layout = QVBoxLayout(dlg)
-        lst = QListWidget()
-        for i, (title, pos) in enumerate(self.local_chapters):
-            item = QListWidgetItem(f"{title}")
-            item.setData(Qt.UserRole, pos)
-            lst.addItem(item)
-        layout.addWidget(lst)
-        dlg.setLayout(layout)
+        was_auto = self.config.get("auto_mode")
+        if was_auto:
+            self.setWindowOpacity(0.95)
+            self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
+            self.content_frame.set_mode(False)
 
-        lst.itemDoubleClicked.connect(lambda item: self._jump_to_chapter(item.data(Qt.UserRole)))
-        lst.itemDoubleClicked.connect(lambda: dlg.accept())
-        dlg.exec_()
+        self.local_toc_dialog = LocalTocSelector(self, self)
+        if self.local_toc_dialog.exec_() == QDialog.Accepted:
+            if self.local_toc_dialog.selected_index is not None:
+                self._jump_to_chapter(self.local_toc_dialog.selected_index)
+
+        self.local_toc_dialog = None
+        self.apply_style()
 
     def _jump_to_chapter(self, pos):
         """跳转到指定字符位置"""
@@ -667,59 +861,20 @@ class StealthReader(QWidget):
 
     # --- 全文搜索 ---
     def open_search_dialog(self):
-        """打开全文搜索对话框"""
-        if not self.local_full_text:
+        """打开全文搜索对话框（本地全文 / 网络目录+章节内容）"""
+        if not self.is_local_mode and not self.current_toc:
+            self.update_text_signal.emit("当前无内容可搜索", False)
             return
 
-        dlg = QDialog(self)
-        dlg.setWindowTitle("🔍 全文搜索")
-        dlg.resize(400, 500)
-        dlg.setStyleSheet(DARK_STYLESHEET)
-        layout = QVBoxLayout(dlg)
+        was_auto = self.config.get("auto_mode")
+        if was_auto:
+            self.setWindowOpacity(0.95)
+            self.content_frame.setStyleSheet(f"background-color: {self.config['bg_color']};")
+            self.content_frame.set_mode(False)
 
-        search_box = QLineEdit()
-        search_box.setPlaceholderText("输入关键词搜索...")
-        layout.addWidget(search_box)
-
-        lst = QListWidget()
-        layout.addWidget(lst)
-
-        status = QLabel("输入关键词后按回车搜索")
-        status.setStyleSheet("color: #888; padding: 5px;")
-        layout.addWidget(status)
-        dlg.setLayout(layout)
-
-        def do_search():
-            keyword = search_box.text().strip()
-            if not keyword:
-                return
-            lst.clear()
-            text = self.local_full_text
-            pos = 0
-            count = 0
-            while count < 100:
-                idx = text.find(keyword, pos)
-                if idx == -1:
-                    break
-                # 截取上下文（前后各15字）
-                start = max(0, idx - 15)
-                end = min(len(text), idx + len(keyword) + 15)
-                snippet = text[start:end].replace('\n', ' ').replace('\r', '')
-                if start > 0:
-                    snippet = "…" + snippet
-                if end < len(text):
-                    snippet = snippet + "…"
-                item = QListWidgetItem(snippet)
-                item.setData(Qt.UserRole, idx)
-                lst.addItem(item)
-                pos = idx + len(keyword)
-                count += 1
-            status.setText(f"找到 {count} 处匹配" if count > 0 else "未找到匹配")
-
-        search_box.returnPressed.connect(do_search)
-        lst.itemDoubleClicked.connect(lambda item: self._jump_to_chapter(item.data(Qt.UserRole)))
-        lst.itemDoubleClicked.connect(lambda: dlg.accept())
+        dlg = SearchDialog(self, self)
         dlg.exec_()
+        self.apply_style()
 
     def scroll_page(self, direction):
         if self.is_local_mode:
@@ -1283,10 +1438,13 @@ class StealthReader(QWidget):
         # 本地模式：章节跳转 + 全文搜索
         if self.is_local_mode:
             cmenu.addAction("📑 章节目录 (本地)").triggered.connect(self.open_local_chapter_selector)
-            cmenu.addAction("🔍 全文搜索").triggered.connect(self.open_search_dialog)
+            cmenu.addAction("🔍 关键词搜索").triggered.connect(self.open_search_dialog)
             cmenu.addSeparator()
         cmenu.addAction("📚 网络书架 (搜索)").triggered.connect(self.open_book_selector)
         cmenu.addAction("📖 章节目录 (网络)").triggered.connect(self.open_toc_selector)
+        # 网络模式也提供搜索（目录标题 + 当前章节内容）
+        if not self.is_local_mode:
+            cmenu.addAction("🔍 关键词搜索").triggered.connect(self.open_search_dialog)
         cmenu.addSeparator()
         cmenu.addAction("⚙️ 设置").triggered.connect(self.open_settings)
         cmenu.addSeparator()
