@@ -20,15 +20,37 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller==6.11.1"
 
-      - name: Build EXE
+      - name: Show build environment
         run: |
-          pyinstaller -F -w -i read.ico -n "StealthReader" main.py
+          python -c "import sys; print(sys.version)"
+          pyinstaller --version
 
-      - name: Upload EXE artifact
+      - name: Build onefile EXE
+        run: pyinstaller --clean --noconfirm --distpath dist StealthReader.spec
+
+      - name: Build onedir fallback
+        run: |
+          $env:SR_MODE = "onedir"
+          pyinstaller --noconfirm --distpath dist-onedir StealthReader.spec
+          Compress-Archive -Path dist-onedir/StealthReader/* -DestinationPath dist-onedir/StealthReader-onedir.zip
+
+      - name: Print SHA256
+        run: |
+          Get-FileHash dist/StealthReader.exe -Algorithm SHA256 | Format-List
+          Get-Item dist/StealthReader.exe | Select-Object Name, Length
+
+      - name: Upload onefile EXE
         uses: actions/upload-artifact@v4
         with:
           name: StealthReader-Windows
           path: dist/StealthReader.exe
+
+      - name: Upload onedir fallback
+        uses: actions/upload-artifact@v4
+        with:
+          name: StealthReader-Windows-onedir
+          path: dist-onedir/StealthReader-onedir.zip
