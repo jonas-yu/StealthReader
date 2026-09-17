@@ -45,12 +45,16 @@ a = Analysis(
 )
 
 _before = len(a.binaries)
-a.binaries = [b for b in a.binaries if not b[0].lower().startswith(API_SET_PREFIXES)]
-_DROPPED = [b[0] for b in a.binaries if b[0].lower().startswith(API_SET_PREFIXES)]
-print('[spec] binaries: %d -> %d (丢弃 %d 个 API Set DLL)'
-      % (_before, len(a.binaries), _before - len(a.binaries)))
-if _DROPPED:
-    print('[spec] !! 仍有残留:', _DROPPED)
+_keep, _dropped = [], []
+for _b in a.binaries:
+    (_dropped if _b[0].lower().startswith(API_SET_PREFIXES) else _keep).append(_b)
+a.binaries = _keep
+# 注意：Windows runner 的 stdout 编码是 cp1252，print() 里绝不能出现非 ASCII 字符，
+# 否则抛 UnicodeEncodeError 直接让构建失败（这个坑踩过一次）。
+print('[spec] binaries: %d -> %d (dropped %d API-Set DLLs)'
+      % (_before, len(_keep), len(_dropped)))
+if _dropped:
+    print('[spec] dropped list:', [d[0] for d in _dropped])
 
 pyz = PYZ(a.pure)
 

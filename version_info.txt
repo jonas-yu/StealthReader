@@ -1,4 +1,5 @@
 # UTF-8
+# 注意：内容保持纯 ASCII，避免 PyInstaller 读版本文件时的编码坑
 VSVersionInfo(
   ffi=FixedFileInfo(
     filevers=(1, 0, 0, 0),
@@ -13,9 +14,9 @@ VSVersionInfo(
   kids=[
     StringFileInfo([
       StringTable(
-        '080404b0',
+        '040904b0',
         [StringStruct('CompanyName', 'Personal'),
-         StringStruct('FileDescription', 'StealthReader - 桌面阅读器'),
+         StringStruct('FileDescription', 'StealthReader - desktop reader'),
          StringStruct('FileVersion', '1.0.0.0'),
          StringStruct('InternalName', 'StealthReader'),
          StringStruct('LegalCopyright', ''),
@@ -23,6 +24,6 @@ VSVersionInfo(
          StringStruct('ProductName', 'StealthReader'),
          StringStruct('ProductVersion', '1.0.0.0')])
     ]),
-    VarFileInfo([VarStruct('Translation', [2052, 1200])])
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
   ]
 )
